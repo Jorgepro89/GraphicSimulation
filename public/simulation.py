@@ -1,6 +1,7 @@
 import simpy
 import numpy as np
 import random
+import json
 
 NUM_WORKSTATIONS = 6
 NUM_BINS = 3
@@ -89,12 +90,13 @@ class ManufacturingFacility:
                 #print(f"Product finished at time {end_time}, took {round(end_time - start_time, 2)} units")
 
 def run_simulation():
+    daily_data = []
+
     for _ in range(NUM_DAYS):
         # Setup and start the simulation
         env = simpy.Environment()
         facility = ManufacturingFacility(env)
         env.process(facility.produce())
-
         env.run(until=SIM_TIME)
 
         # Calculate averages and statistics for a day
@@ -131,6 +133,28 @@ def run_simulation():
         # Bottleneck analysis
         bottleneck_index = np.argmax(avg_waiting_time)
         print(f"Bottleneck workstation: {bottleneck_index + 1} with average waiting time: {avg_waiting_time[bottleneck_index]}")
+
+        # Gather daily statistics
+        daily_statistics = {
+            "production": facility.production_count,
+            "rejections": facility.total_rejections,
+            "rejection_percentage": round((facility.total_rejections / facility.production_count) * 100, 2),
+            "fix_time": facility.total_fix_time,
+            "delay_due_to_bottleneck": facility.total_delay_time,
+            "accidents": facility.total_accidents,
+            "occupancy_per_workstation": facility.workstation_occupancy,
+            "downtime_per_workstation": facility.workstation_downtime,
+            "idle_time_per_workstation": facility.workstation_idle_time,
+            "waiting_time_per_workstation": facility.workstation_waiting_time
+        }
+
+        daily_data.append(daily_statistics)
+
+    # Save daily data to a JSON file
+    with open("daily_statistics.json", "w") as json_file:
+        json.dump(daily_data, json_file, indent=4)
+
+    print("Daily statistics saved to 'daily_statistics.json'")
 
 if __name__ == "__main__":
     run_simulation()
