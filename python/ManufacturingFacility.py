@@ -46,8 +46,8 @@ class ManufacturingFacility:
                     self.total_accidents += 1
                     yield self.env.timeout(100)  # Simular una parada en la producción por 100 unidades de tiempo
 
-                for i in [0, 1, 2, 3, 4, 5]:  # Cambiar línea para el examen, usar un nuevo orden
-                    workstation = self.workstations[i]  # Cambiar línea para el examen
+                for i in [0, 1, 2, 3, 4, 5]:  # Cambie línea para el examen, usar un nuevo orden
+                    workstation = self.workstations[i]  # cambie linea en el examen
 
                     # Get a workstation
                     with workstation.request() as req:

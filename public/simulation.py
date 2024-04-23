@@ -1,304 +1,136 @@
 import simpy
+import numpy as np
 import random
-from enum import Enum
 
-class Debug(Enum):
-    DEBUG = 0
-    INFO = 1
-    WARN = 2
-    ERROR = 3
-    FATAL = 4
-    
-class WrkStationStatus(Enum):
-    START = 1
-    IDLE = 2
-    PRODUCING = 3
-    RESTOCK = 4
-    DOWN = 5
-    STOP = 6
-    
-    def __str__(self):
-        return str(self.name)
-    
-class ProductStatus(Enum):
-    ORDERED = 1
-    PRODUCING = 2
-    DONE = 3
-    FAIL = 4
-    ABORT = 5
-    INCOMPLETE = 6
-    
-    def __str__(self):
-        return str(self.name)
+NUM_WORKSTATIONS = 6
+NUM_BINS = 3
+BIN_CAPACITY = 25
+PROB_FAIL_MEAN = [0.22, 0.11, 0.17, 0.06, 0.08, 0.11]  # Cambiar esta línea para el examen, solo cambiar a las nuevas probabilidades
+PROB_FAIL_STD = 0.03
+PROB_REJECTION = 0.05
+PROB_ACCIDENT = 0.0001
+AVERAGE_FIX_TIME = 3
+AVERAGE_WORK_TIME = 4
 
-class FactoryStatus(Enum):
-    OPEN = 1
-    CLOSED = 2
-    SHUTDOWN = 3
-    
-    def __str__(self):
-        return str(self.name)
-    
-TICKS_PER_DAY = 500 # Number of ticks that represent a day of production 
-CLOSE_RATE = 0.01   # Probability of having a catastrophic accident and close that day
-REJECT_RATE = 0.05  # Probability of rejecting a product at the end of the process
-MAX_RAW_BIN = 25    # The max number of items each station will have at any given time
-RESTOCK_UNITS = 3   # Number of restock units that the factory will have
-RESTOCK_TIME = 2    # The average time units it takes the bus boy to restock a station
-FIX_TIME = 3        # The average time for fixing the station
-WORK_TIME = 4       # The average working time for the stations
-WRK_STATIONS = 6    # Number of work stations in the factory
-WRK_STATION_RATES = [0.2,0.1,0.15,0.05,0.07,0.1]    # Declared error rate of work stations
-DEBUG_LEVEL = Debug.ERROR
-       
-def debugLog(level: Debug, msg: str, extra: str = "") -> None:
-    if(level.value >= DEBUG_LEVEL.value):
-        print(msg + (": " + extra if extra != "" else extra))
+SIM_TIME = 500
+NUM_DAYS = 1 
 
-class Product(object):
-    def __init__(self, id: int, env: simpy.Environment) -> None:
-        self._status = ProductStatus.ORDERED
-        self._id = id
-        self._env = env
-        self._currentStation = -1
-        self._wrkStat = [False] * WRK_STATIONS
-        self._wrkStatTime = [0] * WRK_STATIONS
-        self._startClock = 0
-        self._endClock = 0
-    
-    @property
-    def status(self) -> ProductStatus:
-        return self._status
-    
-    @status.setter
-    def status(self, value: ProductStatus) -> None:
-        self._status = value
-        if(self._status == ProductStatus.PRODUCING and self._startClock == 0):
-            self._startClock = self._env.now
-            debugLog(Debug.DEBUG, 'The product %06d started production at %.2f' % (self._id, self._startClock))
-        elif(self._status == ProductStatus.DONE or self._status == ProductStatus.FAIL or self._status == ProductStatus.ABORT):
-            self._endClock = self._env.now
-            debugLog(Debug.DEBUG, 'The product %06d finished production at %.2f' % (self._id, self._endClock), str(self._status))
-        
-    @property
-    def processBy(self) -> int:
-        return self._currentStation
-    
-    @processBy.setter
-    def processBy(self, value: int) -> None:
-        self._currentStation = value
-        self._wrkStat[value] = True
-        self._wrkStatTime[value] = self._env.now
-        if(self._currentStation == 0):
-            self.status = ProductStatus.PRODUCING
-        debugLog(Debug.DEBUG, 'The product %06d received at workstation %02d at %.2f' % (self._id, (self._currentStation+1), self._wrkStatTime[value]))
-        
-    @property
-    def isDone(self) -> bool:
-        return all(self._wrkStat) and not self.isAborted
-    
-    @property
-    def isAborted(self) -> bool:
-        return self.status == ProductStatus.ABORT
-    
-    @property
-    def nextStation(self) -> int:
-        """Returns the next workstation that the product still has to visit
+class ManufacturingFacility:
+    def __init__(self, env):
+        self.env = env
+        self.workstations = [simpy.Resource(env, capacity=1) for _ in range(NUM_WORKSTATIONS)]
+        self.bins = [simpy.Container(env, capacity=BIN_CAPACITY, init=BIN_CAPACITY) for _ in range(NUM_BINS)]
+        self.supplier = simpy.Container(env, capacity=BIN_CAPACITY * NUM_WORKSTATIONS * NUM_BINS,
+                                         init=BIN_CAPACITY * NUM_WORKSTATIONS * NUM_BINS)
+        self.production_count = 0
+        self.total_fix_time = 0
+        self.total_delay_time = 0
+        self.total_rejections = 0
+        self.total_accidents = 0
+        self.workstation_occupancy = [0] * NUM_WORKSTATIONS
+        self.workstation_downtime = [0] * NUM_WORKSTATIONS
+        self.workstation_idle_time = [0] * NUM_WORKSTATIONS
+        self.workstation_waiting_time = [0] * NUM_WORKSTATIONS
+        self.supplier_occupancy = 0
 
-        Returns:
-            int: The index of the next missing workstation
-        """
-        return next((i for i,v in enumerate(self._wrkStat) if not v), None)
-    
-    @property
-    def prodTime(self) -> float:
-        if(self._startClock == 0):
-            return self._startClock
-        elif(self._endClock == 0):
-            return self._env.now - self._startClock
-        return self._endClock - self._startClock
-    
-    def wasProccessedBy(self, id: int) -> bool:
-        return self._wrkStat[id]
-    
-    def stopProduction(self, time: float) -> None:
-        self._status = ProductStatus.INCOMPLETE
-        self._endClock = time
-            
-class Workstation(object):
-    def __init__(self, env: simpy.Environment, busBoy: simpy.Resource, id: int, errRate: float) -> None:
-        self._id = id
-        self._env = env
-        self._busBoy = busBoy
-        self._errRate = errRate
-        self._binItems = MAX_RAW_BIN
-        self._product = None
-        self._unit = simpy.Resource(self._env)
-        self._action = None
-    
-    @property
-    def id(self) -> simpy.Process:
-        return self._id + 1
-    
-    @property
-    def action(self) -> simpy.Process:
-        return self._action
-    
-    @action.setter
-    def action(self, value) -> None:
-        self._action = value
-        
-    @property
-    def unit(self) -> simpy.Resource:
-        return self._unit
-    
-    @property
-    def product(self) -> Product:
-        return self._product
-    
-    @product.setter
-    def product(self, value: Product) -> None:
-        self._product = value
-        self._product.processBy = self._id
-        
-    def endProduction(self, time: float) -> None:
-        debugLog(Debug.DEBUG, 'The workstation %d end day at %.2f' % (self.id, time))
-        if self._product:
-            self._product.stopProduction(time)
-    
-    def processProd(self) -> simpy.Process:
-        try:
-            # Check if I have enough items to work
-            if(self._binItems == 0):
-                with self._busBoy.request() as req:
-                    debugLog(Debug.WARN, 'The workstation %d request restock at %.2f' % (self.id, self._env.now))
-                    yield req 
-                    # The resource is available
-                    debugLog(Debug.DEBUG, 'The workstation %d request is being restocked at %.2f' % (self.id, self._env.now))
-                    restock_time = abs(random.normalvariate(RESTOCK_TIME,1))
-                    debugLog(Debug.DEBUG, "The workstation %d will take %.2f units of time to restock" % (self.id,restock_time))
-                    yield self._env.timeout(restock_time)
-                    self._binItems = MAX_RAW_BIN
-                    debugLog(Debug.DEBUG, "The workstation %d was restocked at %.2f" % (self.id,self._env.now))
-            # Check if there is the need to fix this work station
-            if random.random() < self._errRate:
-                debugLog(Debug.WARN, 'The workstation %d presented a failure at %.2f' % (self.id, self._env.now))
-                fixing_time = abs(random.normalvariate(FIX_TIME,1))
-                debugLog(Debug.DEBUG, "The workstation %d will take %.2f units of time to be fixed" % (self.id,fixing_time))
-                yield self._env.timeout(fixing_time)
-                debugLog(Debug.INFO, 'The workstation %d is back on line at %.2f' % (self.id, self._env.now))
-            # Process the product
-            self._binItems -= 1
-            debugLog(Debug.DEBUG, 'The workstation %d starts processing product %06d at %.2f' % (self.id, self.product._id, self._env.now))
-            working_time = abs(random.normalvariate(WORK_TIME,1))
-            yield self._env.timeout(working_time)
-            debugLog(Debug.DEBUG, 'The workstation %d is done processing prod %06d at %.2f' % (self.id, self.product._id, self._env.now))
-        except simpy.Interrupt:
-            debugLog(Debug.ERROR, "There was a catastrophic issue, %d at %.2f" % (self.id, self._env.now))
-            self.product.status = ProductStatus.ABORT
-        finally:
-            self._product = None
-
-class Factory(object):
-    def __init__(self, env: simpy.Environment) -> None:
-        self._env = env
-        self._restockDevice = simpy.Resource(self._env, RESTOCK_UNITS)
-        self._workstations = []
-        self._storage = []
-        self._status = FactoryStatus.OPEN
-        # Create all the work stations
-        for i in range(WRK_STATIONS):
-            self._workstations.append(Workstation(self._env, self._restockDevice, i, WRK_STATION_RATES[i]))
-            debugLog(Debug.DEBUG, "Ready %s" % self._workstations[i])
-        self.action = self._env.process(self.produce())
-        
-    def __str__(self) -> str:
-        output = "\n==========\nFactory %s" % (self._status)
-        done = sum(1 for i in self._storage if i._status == ProductStatus.DONE)
-        fail = sum(1 for i in self._storage if i._status == ProductStatus.FAIL)
-        ordered = sum(1 for i in self._storage if i._status == ProductStatus.ORDERED)
-        incomplete = sum(1 for i in self._storage if i._status == ProductStatus.INCOMPLETE)
-        output += "\nTotal orders planned: %d" % (len(self._storage))
-        output += "\nProduced %d items today, but %d failed quality inspection." % (done, fail)
-        output += "\nOrders left planned: %d \tOrders left on floor: %d" % (ordered, incomplete)
-        if(self._status == FactoryStatus.SHUTDOWN):
-            abort = sum(1 for i in self._storage if i._status == ProductStatus.ABORT)
-            output += "\nOrders aborted due shutdown: %d" % (abort)
-        if(DEBUG_LEVEL.value == Debug.DEBUG):
-            prod = sum(1 for i in self._storage if i._status == ProductStatus.PRODUCING)
-            output += "\tErr: %d" % (prod)
-            for prd in self._storage:
-                if prd._status == ProductStatus.PRODUCING:
-                    output += "\n%s" % str(prd)
-        return output
-    
-    def getWorkstation(self, index : int) -> Workstation:
-        return self._workstations[index]
-    
-    def orderProduct(self, id: int) -> simpy.Process:
-        if(self._status == FactoryStatus.CLOSED):
-            return
-        prod = Product(id, self._env)
-        self._storage.append(prod)
-        while not prod.isDone:
-            idx = prod.nextStation
-            # Check the situation of parallel stations
-            if(idx == 3):   # station 4
-                if(not prod.wasProccessedBy(4) and self.getWorkstation(idx).unit.count > self.getWorkstation(idx+1).unit.count):
-                    idx += 1
-            debugLog(Debug.DEBUG, "Product %06d to be processed by WS %02d" % (prod._id, (idx+1)))
-            station = self.getWorkstation(idx)
-            with station.unit.request() as wrkProcess:
-                yield wrkProcess
-                station.product = prod
-                station.action = yield self._env.process(station.processProd())
-        if not prod.isAborted:
-            if random.random() < REJECT_RATE:
-                prod.status = ProductStatus.FAIL
-            else:
-                prod.status = ProductStatus.DONE
-        
-    def produce(self) -> simpy.Process:
-        i = 0
-        # for i in range(5):
+    def produce(self):
         while True:
-            self._env.process(self.orderProduct(i+1))
-            yield self._env.timeout(0.1)
-            i += 1
-          
-    def shutDown(self) -> None:
-        if random.random() < CLOSE_RATE:
-            closing_in = abs(random.normalvariate(12,1))
-            debugLog(Debug.INFO, "Factory will close today in %d units." % closing_in)
-            yield self._env.timeout(closing_in)
-            # Interrupt all actions when catastrophic event triggers.
-            map(lambda s: s.action.interrupt(), self._workstations)
-            debugLog(Debug.ERROR, "Factory closed at %.2f." % self._env.now) 
-            self._status = FactoryStatus.SHUTDOWN
-            for prd in self._storage:
-                if prd._status == ProductStatus.PRODUCING:
-                    prd.status = ProductStatus.ABORT
-        else:
-            debugLog(Debug.INFO, "Factory will be accident free today.")
-    
-    def closeDown(self, time: float) -> None:
-        if self._status != FactoryStatus.SHUTDOWN:
-            self._status = FactoryStatus.CLOSED
-            # map(lambda s: s.endProduction(time), self._workstations)
-            [w.endProduction(time) for w in self._workstations]
-            for prd in self._storage:
-                    if prd._status == ProductStatus.PRODUCING:
-                        prd.stopProduction(time)
-            debugLog(Debug.INFO, "Factory closed at %.2f." % time) 
+            # Get a bin of raw materials
+            with self.supplier.get(BIN_CAPACITY * NUM_WORKSTATIONS) as bin:
 
+                start_time = round(self.env.now, 2)  # Registra el tiempo
+                yield self.env.timeout(np.random.normal(AVERAGE_WORK_TIME))
 
-def main() -> None:
-    env = simpy.Environment()
-    factory = Factory(env)
-    env.process(factory.shutDown())
-    env.run(until=TICKS_PER_DAY)
-    factory.closeDown(TICKS_PER_DAY)
-    print(factory)
-    
-if __name__ == '__main__':
-    main()
+                # Check for accidents
+                if np.random.random() < PROB_ACCIDENT:
+                    self.total_accidents += 1
+                    yield self.env.timeout(100)  # Simular una parada en la producción por 100 unidades de tiempo
+
+                for i in [0, 1, 2, 3, 4, 5]:  # Cambie línea para el examen, usar un nuevo orden
+                    workstation = self.workstations[i]  # cambie linea en el examen
+
+                    # Get a workstation
+                    with workstation.request() as req:
+                        yield req
+
+                        # Calculate probability of failure for this workstation
+                        prob_fail = max(0, min(1, np.random.normal(PROB_FAIL_MEAN[i], PROB_FAIL_STD)))
+
+                        # Check for workstation failure
+                        if random.random() < prob_fail:
+                            self.total_fix_time += round(np.random.exponential(AVERAGE_FIX_TIME), 2)
+                            self.workstation_downtime[i] += round(np.random.exponential(AVERAGE_FIX_TIME), 2)
+                            yield self.env.timeout(np.random.exponential(AVERAGE_FIX_TIME))
+                            #print(f"Product stopped at workstation {i + 1} at time {round(self.env.now, 2)} due to failure")
+
+                        # Simulate work at workstation
+                        yield self.env.timeout(np.random.normal(AVERAGE_WORK_TIME))
+                        self.workstation_occupancy[i] += 1
+
+                        # Print message indicating product and workstation
+                        end_time = round(self.env.now, 2)
+                        #print(f"Product at workstation {i + 1} finished at time {end_time}, took {round(end_time - start_time, 2)} units")
+
+                        # Track workstation status
+                        if req.triggered:
+                            self.workstation_waiting_time[i] += self.env.now - start_time
+                        else:
+                            self.workstation_idle_time[i] += self.env.now - start_time
+
+                # Check for rejection
+                if np.random.random() < PROB_REJECTION:
+                    self.total_rejections += 1
+                    continue  # Skip further processing if rejected
+
+                # End of production process
+                end_time = round(self.env.now, 2)
+                self.production_count += 1
+                self.total_delay_time += round((end_time - start_time), 2)
+                #print(f"Product finished at time {end_time}, took {round(end_time - start_time, 2)} units")
+
+def run_simulation():
+    for _ in range(NUM_DAYS):
+        # Setup and start the simulation
+        env = simpy.Environment()
+        facility = ManufacturingFacility(env)
+        env.process(facility.produce())
+
+        env.run(until=SIM_TIME)
+
+        # Calculate averages and statistics for a day
+        avg_production_day = round(facility.production_count, 2)
+        avg_rejections_day = round(facility.total_rejections, 2)
+        avg_fix_time_day = round(facility.total_fix_time, 2)
+        avg_delay_due_to_bottleneck_day = round(facility.total_delay_time, 2)
+        avg_accidents_day = round(facility.total_accidents, 2)
+
+        # Calculate average occupancy and downtime for each workstation for a day
+        avg_occupancy_day = [round(occ, 2) for occ in facility.workstation_occupancy]
+        avg_downtime_day = [round(downtime, 2) for downtime in facility.workstation_downtime]
+
+        # Calculate production rejection percentage
+        rejection_percentage = round((avg_rejections_day / avg_production_day) * 100, 2)
+
+        # Calculate average idle and waiting time for each workstation
+        avg_idle_time = [round(idle, 2) for idle in facility.workstation_idle_time]
+        avg_waiting_time = [round(waiting, 2) for waiting in facility.workstation_waiting_time]
+
+        # Print daily statistics
+        print("------------DAY EXPECTATIONS--------------")
+        print(f"Average production for a day: {avg_production_day}")
+        print(f"Average quality failures per day: {avg_rejections_day}")
+        print(f"Average production rejection percentage: {rejection_percentage}%")
+        print(f"Average fix time in all the plant for a day: {avg_fix_time_day}")
+        print(f"Average delay due to bottleneck for a day: {avg_delay_due_to_bottleneck_day}")
+        print(f"Average accidents per day: {avg_accidents_day}")
+        print(f"Average occupancy for each workstation for a day: {avg_occupancy_day}")
+        print(f"Average downtime for each workstation for a day: {avg_downtime_day}")
+        print(f"Average idle time for each workstation for a day: {avg_idle_time}")
+        print(f"Average waiting time for each workstation for a day: {avg_waiting_time}")
+
+        # Bottleneck analysis
+        bottleneck_index = np.argmax(avg_waiting_time)
+        print(f"Bottleneck workstation: {bottleneck_index + 1} with average waiting time: {avg_waiting_time[bottleneck_index]}")
+
+if __name__ == "__main__":
+    run_simulation()
