@@ -1,6 +1,11 @@
-# Getting Started with Create React App
+# Simulation Manufacturing with React App
 
 This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+
+## Team Members:
+- Raquel Magdalena Ochoa Martínez (0235324)
+- Pablo Armando Uscanga Camacho ()
+- Jorge Vargas González
 
 ## Available Scripts
 
